@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Biziso</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0a0806;
+        color: #f5f5f5;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+      }
+      .msg {
+        opacity: 0.7;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Fallback only. The main window loads the Biziso platform directly
+         (see tauri.conf.json); this shows if local content is ever used. -->
+    <div class="wrap">
+      <p class="msg">Loading Biziso...</p>
+    </div>
+  </body>
+</html>
