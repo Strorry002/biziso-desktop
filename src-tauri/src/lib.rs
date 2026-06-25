@@ -4,12 +4,9 @@
 //
 // F0:   single-instance, persisted window state.
 // F1:   system tray + minimize-to-tray.
-// F1.2: web -> native bridge. mod-touch emits Tauri events from biziso.com
-//       (via a small postMessage shim injected on each page load); we listen
-//       and drive the unread tray badge + OS notifications. Custom commands are
-//       ACL-blocked from a remote origin, so the bridge uses the event channel,
-//       which core:default permits (core:event:allow-emit). mod-touch stays
-//       Tauri-agnostic -- it only postMessages, a no-op in a plain browser.
+// F1.2: web -> native bridge (unread tray badge + OS notifications via events).
+// F2:   biziso:// deep links -- focus the window and navigate the webview to
+//       the matching biziso.com URL (auth/login return, message links).
 
 #[cfg(desktop)]
 use tauri::{
@@ -17,9 +14,11 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Listener, Manager};
+#[cfg(desktop)]
+use tauri_plugin_deep_link::DeepLinkExt;
 
 // Injected after every page load. Turns mod-touch's postMessages into Tauri
-// events the Rust side listens for.
+// events the Rust side listens for. mod-touch stays Tauri-agnostic.
 const BRIDGE_JS: &str = r#"
 (function () {
   if (window.__bizisoBridge) return;
@@ -43,7 +42,6 @@ const BRIDGE_JS: &str = r#"
 })();
 "#;
 
-// Reflect the unread count on the tray tooltip and the window title.
 fn apply_unread(app: &tauri::AppHandle, count: u32) {
     let label = if count > 0 {
         format!("Biziso ({})", count)
@@ -72,6 +70,24 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+// Focus the window and navigate the webview to the biziso.com URL a biziso://
+// deep link maps to (biziso://<path> -> https://biziso.com/<path>).
+fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        if let Some(rest) = url.strip_prefix("biziso://") {
+            let target = format!("https://biziso.com/{}", rest.trim_start_matches('/'));
+            let js = format!(
+                "window.location.assign({})",
+                serde_json::to_string(&target).unwrap_or_else(|_| "\"https://biziso.com\"".to_string())
+            );
+            let _ = win.eval(&js);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -79,8 +95,13 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder
-            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
                 show_main(app);
+                // On Windows a deep link wakes the running app via a second
+                // launch; the biziso:// URL arrives in argv.
+                if let Some(url) = args.iter().find(|a| a.starts_with("biziso://")) {
+                    handle_deep_link(app, url);
+                }
             }))
             .plugin(tauri_plugin_window_state::Builder::default().build());
     }
@@ -88,15 +109,14 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        // biziso.com is a remote URL; init scripts do not reliably run on remote
-        // content, so inject the bridge shim after each page load instead.
+        .plugin(tauri_plugin_deep_link::init())
         .on_page_load(|webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 let _ = webview.eval(BRIDGE_JS);
             }
         })
         .setup(|app| {
-            // The web app emits these events; we drive the native layer from them.
+            // Bridge: the web app emits these events; we drive the native layer.
             let h = app.handle().clone();
             app.listen("biziso://unread", move |event| {
                 let count = serde_json::from_str::<serde_json::Value>(event.payload())
@@ -116,6 +136,17 @@ pub fn run() {
 
             #[cfg(desktop)]
             {
+                // Deep links: register the scheme at runtime (needed in dev; the
+                // installer registers it for packaged builds) + handle opens.
+                #[cfg(any(windows, target_os = "linux"))]
+                let _ = app.deep_link().register_all();
+                let dh = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        handle_deep_link(&dh, url.as_str());
+                    }
+                });
+
                 // System tray: left-click shows the window; the menu has Show / Quit.
                 let show_i = MenuItem::with_id(app, "show", "Show Biziso", true, None::<&str>)?;
                 let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
