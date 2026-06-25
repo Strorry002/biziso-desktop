@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "biziso-bridge",
+  "description": "Let the biziso.com web app emit the bridge events (biziso://unread, biziso://notify) that drive the native tray badge and OS notifications. Event emit is granted by core:default; custom commands are intentionally not exposed to the remote origin.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://biziso.com", "https://*.biziso.com"]
+  },
+  "permissions": ["core:default"]
+}
