@@ -5,8 +5,9 @@
 // F0:   single-instance, persisted window state.
 // F1:   system tray + minimize-to-tray.
 // F1.2: web -> native bridge (unread tray badge + OS notifications via events).
-// F2:   biziso:// deep links -- focus the window and navigate the webview to
-//       the matching biziso.com URL (auth/login return, message links).
+// F2:   biziso:// deep links; chrome-less navigation escape (a floating
+//       "Back to Biziso" on external pages like the Google OAuth flow, Alt+Left,
+//       and a tray "Home" item) so the user is never stranded off biziso.com.
 
 #[cfg(desktop)]
 use tauri::{
@@ -17,12 +18,16 @@ use tauri::{Listener, Manager};
 #[cfg(desktop)]
 use tauri_plugin_deep_link::DeepLinkExt;
 
-// Injected after every page load. Turns mod-touch's postMessages into Tauri
-// events the Rust side listens for. mod-touch stays Tauri-agnostic.
-const BRIDGE_JS: &str = r#"
+const BIZISO_HOME: &str = "https://biziso.com/";
+
+// Injected after every page load. Carries the mod-touch bridge (postMessage ->
+// Tauri events) plus the navigation escape for the chrome-less shell.
+const SHELL_JS: &str = r#"
 (function () {
-  if (window.__bizisoBridge) return;
-  window.__bizisoBridge = true;
+  if (window.__bizisoShell) return;
+  window.__bizisoShell = true;
+
+  // Bridge: mod-touch postMessages -> Tauri events (idle off biziso.com).
   function emit(ev, payload) {
     try {
       if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.emit) {
@@ -39,6 +44,30 @@ const BRIDGE_JS: &str = r#"
       emit('biziso://notify', { title: String(d.title || 'Biziso'), body: String(d.body || '') });
     }
   });
+
+  // Alt+Left = back (browser-style), works on every page.
+  window.addEventListener('keydown', function (e) {
+    if (e.altKey && (e.key === 'ArrowLeft')) { e.preventDefault(); try { history.back(); } catch (x) {} }
+  });
+
+  // Chrome-less shell: on EXTERNAL pages (e.g. the Google OAuth flow) there is
+  // no in-app way back, so inject a floating "Back to Biziso" escape button.
+  if (location.hostname.indexOf('biziso.com') === -1) {
+    var add = function () {
+      if (document.getElementById('__bizisoBack')) return;
+      if (!document.body) return;
+      var b = document.createElement('button');
+      b.id = '__bizisoBack';
+      b.textContent = '← Назад в Biziso';
+      b.setAttribute('style', 'position:fixed;top:12px;left:12px;z-index:2147483647;padding:9px 14px;background:#0a0806;color:#fff;border:1px solid #FFB800;border-radius:10px;font:600 14px system-ui,-apple-system,sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.45);');
+      b.onclick = function () {
+        try { if (history.length > 1) { history.back(); } else { location.href = 'https://biziso.com/'; } }
+        catch (x) { location.href = 'https://biziso.com/'; }
+      };
+      document.body.appendChild(b);
+    };
+    if (document.body) { add(); } else { document.addEventListener('DOMContentLoaded', add); }
+  }
 })();
 "#;
 
@@ -64,6 +93,16 @@ fn do_notify(app: &tauri::AppHandle, title: String, body: String) {
 
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+// Navigate the main webview back to the Biziso home (used by the tray "Home").
+fn go_home(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval(&format!("window.location.assign('{}')", BIZISO_HOME));
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
@@ -97,8 +136,6 @@ pub fn run() {
         builder = builder
             .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
                 show_main(app);
-                // On Windows a deep link wakes the running app via a second
-                // launch; the biziso:// URL arrives in argv.
                 if let Some(url) = args.iter().find(|a| a.starts_with("biziso://")) {
                     handle_deep_link(app, url);
                 }
@@ -112,7 +149,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .on_page_load(|webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                let _ = webview.eval(BRIDGE_JS);
+                let _ = webview.eval(SHELL_JS);
             }
         })
         .setup(|app| {
@@ -147,10 +184,11 @@ pub fn run() {
                     }
                 });
 
-                // System tray: left-click shows the window; the menu has Show / Quit.
+                // System tray: left-click shows the window; menu = Show / Home / Quit.
                 let show_i = MenuItem::with_id(app, "show", "Show Biziso", true, None::<&str>)?;
+                let home_i = MenuItem::with_id(app, "home", "Home (biziso.com)", true, None::<&str>)?;
                 let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+                let menu = Menu::with_items(app, &[&show_i, &home_i, &quit_i])?;
                 let _tray = TrayIconBuilder::with_id("main")
                     .icon(app.default_window_icon().expect("bundled icon").clone())
                     .tooltip("Biziso")
@@ -158,6 +196,7 @@ pub fn run() {
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => show_main(app),
+                        "home" => go_home(app),
                         "quit" => app.exit(0),
                         _ => {}
                     })
